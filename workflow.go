@@ -15,8 +15,11 @@ import (
 	"github.com/streadway/amqp"
 )
 
-const NotRecentlyCrawled int = 0
-const AlreadyCrawled int = -1
+// const NotRecentlyCrawled int = 0
+const ReadyToEnqueue int = 0
+
+// const AlreadyCrawled int = -1
+const Enqueued int = 1
 
 func ReadFromQueue(
 	inboundChannel <-chan amqp.Delivery,
@@ -43,20 +46,21 @@ func ReadFromQueue(
 				continue
 			}
 
-			crawlCount, err := ttlHashSet.Get(message.URL())
-			if err != nil {
-				item.Reject(true)
-				log.Errorln("Couldn't check existence of (rejecting):", message.URL(), err)
-				continue
-			}
+			// crawlCount, err := ttlHashSet.Get(message.URL())
+			// if err != nil {
+			// 	item.Reject(true)
+			// 	log.Errorln("Couldn't check existence of (rejecting):", message.URL(), err)
+			// 	continue
+			// }
 
-			if crawlCount == AlreadyCrawled {
-				log.Debugln("URL read from queue already crawled:", message.URL())
-				if err = item.Ack(false); err != nil {
-					log.Errorln("Ack failed (ReadFromQueue): ", message.URL())
-				}
-				continue
-			}
+			// We want to crawl everything in the queue as things should only be in the queue once
+			// if crawlCount == AlreadyCrawled {
+			// 	log.Debugln("URL read from queue already crawled:", message.URL())
+			// 	if err = item.Ack(false); err != nil {
+			// 		log.Errorln("Ack failed (ReadFromQueue): ", message.URL())
+			// 	}
+			// 	continue
+			// }
 
 			outbound <- message
 
@@ -105,7 +109,7 @@ func CrawlURL(
 				continue
 			}
 
-			if crawlCount >= maxCrawlRetries {
+			if crawlCount > maxCrawlRetries {
 				item.Reject(false)
 				log.Errorf("Aborting crawl of URL which has been retried %d times (rejecting): %s", maxCrawlRetries, u.String())
 				continue
@@ -130,10 +134,11 @@ func CrawlURL(
 					item.Reject(true)
 					log.Warningln("Couldn't crawl (requeueing):", u.String(), err)
 				case http_crawler.ErrRedirect:
-					setErr := ttlHashSet.Set(u.String(), AlreadyCrawled)
-					if setErr != nil {
-						log.Errorln("Couldn't mark item as already crawled:", u.String(), setErr)
-					}
+
+					// setErr := ttlHashSet.Set(u.String(), AlreadyCrawled)
+					// if setErr != nil {
+					// 	log.Errorln("Couldn't mark item as already crawled:", u.String(), setErr)
+					// }
 
 					item.Reject(false)
 					// log at INFO because redirect URLs are not a concern
@@ -155,7 +160,7 @@ func CrawlURL(
 					log.Errorln("Ack failed (CrawlURL): ", item.URL())
 				}
 
-				err = ttlHashSet.Set(item.URL(), AlreadyCrawled)
+				err = ttlHashSet.Set(item.URL(), ReadyToEnqueue)
 				if err != nil {
 					log.Errorln("Couldn't mark item as already crawled:", item.URL(), err)
 				}
@@ -279,9 +284,15 @@ func PublishURLs(ttlHashSet *ttl_hash_set.TTLHashSet, queueManager *queue.Manage
 			continue
 		}
 
-		if crawlCount == AlreadyCrawled {
-			log.Debugln("URL extracted from page already crawled:", url)
-		} else if crawlCount == NotRecentlyCrawled {
+		// if crawlCount == AlreadyCrawled {
+			// log.Debugln("URL extracted from page already crawled:", url)
+		if crawlCount == Enqueued {
+			log.Debugln("URL is already in the queue:", url)
+		// } else if crawlCount == NotRecentlyCrawled {
+		} else if crawlCount == ReadyToEnqueue {
+			// mark url as in queue
+			ttlHashSet.SetWithLongerTimeout(url, Enqueued)
+
 			err = queueManager.Publish("#", "text/plain", url)
 			if err != nil {
 				log.Fatalln("Delivery failed:", url, err)
